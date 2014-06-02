@@ -2,6 +2,7 @@ import sys
 import math
 import Timer
 import Slice
+import IO
 
 from collections import deque
 import numpy as np
@@ -16,16 +17,6 @@ from skimage.feature import peak_local_max
 
 from mpl_toolkits.mplot3d import Axes3D
 
-
-# Load picture and detect edges
-# 03972_0_74_62.jpg.gif - Image with a streak
-# 03941_0_74_62.jpg.gif - Standard image with no abnormalities except a partial 
-#  circle
-# 03980_0_74_62.jpg.gif - A very abnormal streak
-# 03988_0_74_62.jpg.gif - An ellipse splitting
-# 03989_0_74_62.jpg.gif - An ellipse split
-# 03960_0_74_62.jpg.gif - A cirple just before splitting
-# 03961_0_74_62.jpg.gif - A cirple just after splitting
 
 # Case 1, 03941_0_74_62.jpg.gif top vessel 
 # Explored correctly in full
@@ -135,21 +126,32 @@ def exploreVessel(vessel):
    else:
       print "Vessel exploration was unsuccessful"
    vessel.printVessel()
-
-   #for next in vessel.getNextVessels():
-   #   print
-   #   print
-   #   prevCoordinate = next.getPreviousCoordinate()
-   #   value = next.exploreToEnd(prevCoordinate[0] + 1, None)
-   #   if value:
-   #      print "Vessel exploration was successful"
-   #   else:
-   #      print "Vessel exploration was unsuccessful"
-   #   next.printVessel()
    
-queue = deque()
-queue.append(vessel)
-BFS(queue, sliceID, seed)
+def main():
+   # [0] - name of script
+   # [1] - flag for synthetic data
+   # [2] - sliceID
+   # [3] - seed[0]
+   # [4] - seed[1]
+   # [5] - no. of synthetic images or filenames
+   
+   sliceID = int(sys.argv[2])
+   seed = sys.argv[3:5]
+   seed[0] = float(seed[0])
+   seed[1] = float(seed[1])
+   
+   if int(sys.argv[1]):
+      synthetic = True
+      sys.argv[1] = True
+      sys.argv[2] = int(sys.argv[5])
+      sys.argv = sys.argv[0:3]
+   else:
+      synthetic = False
+      sys.argv[1] = False
+      sys.argv = sys.argv[0:2] + sys.argv[5:]
+   
+   queue = deque()
+   queue.append(vessel)
+   BFS(queue, sliceID, seed)
 
-
-#exploreVessel(vessel)
+main()

@@ -10,12 +10,15 @@ import matplotlib.pyplot as plt
 import numpy
 import math
 import sys
+import IO
 
 vesselID = 1
 
 class Slice:
-   def __init__(self, filename, sliceID):
-      self.image = io.imread(filename)
+   def __init__(self, sliceID):
+      
+      #self.image = io.imread(filename)
+      self.image = IO.getImage(sliceID)
       self.sliceID = sliceID
       self.edges = None
       self.filtered = None
@@ -480,7 +483,7 @@ class Vessel:
       self.clearVariables()
    
    def addSlice(self, sliceID):
-      self.slice = Slice(sys.argv[sliceID], sliceID)
+      self.slice = Slice(sliceID)
       self.slice.filterOut(192) # 192
       self.slice.findEdges(2)
       self.slice.correctEdges()
@@ -790,7 +793,7 @@ class Vessel:
 
    # Pre-condition: sliceID & odlCentroid should be valid and appropriate.
    def extendVessel(self, sliceID, oldCentroid):
-      if sliceID < 0 or sliceID >= len(sys.argv):
+      if not IO.hasImage(sliceID):
          if self.exploreInReverse:
             self.beginVessel('out-of-scope')
          else:
@@ -810,8 +813,6 @@ class Vessel:
          print "Warning: No regions could be identified in the slice." +\
                "Skipping slice no." + str(sliceID)
          return True
-      #print str(len(self.regions)) + " regions in: slice (" + str(sliceID) + \
-      #          ") :" + str(sys.argv[sliceID])
       
       self.orderRegions(candidatePoint)
       if self.prevRegions:
@@ -931,26 +932,24 @@ class Vessel:
    #                 seed should be valid if this is a first exploration.
    #           
    def exploreToEnd(self, sliceID, seed):
-      #if seed:
-      #   print "exploreToEnd: " + str(sliceID) + ": (" + str(seed[0]) + ", " + str(seed[1]) + ")"
-      #else:
-      #   print "exploreToEnd: " + str(sliceID)
       if seed == None:
          if len(self.coordinates) == 0:
             print "A seed point required to initiate the vessel."
             return False
          else:
             seed = self.getPreviousCoordinate()[1]
+      if not IO.hasImage(sliceID):
+         print "slice ID out of bounds."
+         return False
       flag = True
-      while(flag and sliceID < len(sys.argv)):
+      while(flag):
          flag = self.extendVessel(sliceID, seed)
          # TODO: take care of case where no coordinates?
          seed = self.getPreviousCoordinate()[1]
          sliceID += 1
-         if sliceID >= len(sys.argv):
+         if not IO.hasImage(sliceID):
             self.endVessel("out-of-scope")
             self.clearVariables()
-            print "No more files."
             return True
       return True
    def exploreToBeginning(self, sliceID, seed):
@@ -964,17 +963,19 @@ class Vessel:
             return False
          else:
             seed = self.getPreviousCoordinate()[1]
+      if not IO.hasImage(sliceID):
+         print "slice ID out of bounds."
+         return False
       flag = True
       self.setExploreInReverse(True)
-      while(flag and sliceID >= 0 and sliceID < len(sys.argv)):
+      while(flag):
          flag = self.extendVessel(sliceID, seed)
          # TODO: take care of case where no coordinates?
          seed = self.getPreviousCoordinate()[1]
          sliceID -= 1
-         if sliceID == 0 or sliceID >= len(sys.argv):            
+         if not IO.hasImage(sliceID):
             self.beginVessel("out-of-scope")
             self.clearVariables()
-            print "No more files."
             return True
       return True
    def printVessel(self):
@@ -986,22 +987,26 @@ class Vessel:
       print "Length of vessel: " + str(len(self.coordinates)) + " slices"
       print "Range of vessel: " + str(self.coordinates[0][0]) + " - " + \
             str(self.coordinates[-1][0])
+      print "Slice ID\tCentroid\t\tCross section area"
       for coordinate in self.coordinates:
-         print str(coordinate[0]) + " - " + sys.argv[coordinate[0]] + " - (" + str(coordinate[1][0]) + ", " + \
-               str(coordinate[1][1]) + ", " + str(coordinate[2]) + ")"         
+         print str(coordinate[0]).rjust(3) + "\t\t(" + str("%.2f" % coordinate[1][0]).rjust(6) + ", " +\
+               str("%.2f" % coordinate[1][1]).rjust(6) + ")\t" + str(coordinate[2]).rjust(3)
       print "Next vessels:"
       for next in self.next:
-         print "Next: " + str(next.vesselID),
+         print "\tVessel " + str(next.vesselID),
          if next.isExplored():
             print " - Explored"
          else:
             print " - To be explored"
-      print "Prev vessels:"
+      if not self.next:
+         print "\tNone"
+      print "Previous vessels:"
       for prev in self.previous:
-         print "Prev: " + str(prev.vesselID),
+         print "\tVessel " + str(prev.vesselID),
          if prev.isExplored():
             print " - Explored"
          else:
             print " - To be explored"
-      print
+      if not self.previous:
+         print "\tNone"
       print
