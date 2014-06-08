@@ -13,11 +13,32 @@ import sys
 import IO
 
 vesselID = 1
+searchScope = 35.0
+thresholdDetection = 0.0
+thresholdValidation = 0.36
+enableWarnings = False
+traceBoundaryVessels = False
+coordinatesSet = set()
+
+def setTraceBoundaryVessels(val):
+   global traceBoundaryVessels
+   traceBoundaryVessels = val
+   
+def setEnableWarnings(val):
+   global enableWarnings
+   enableWarnings = val
+   
+
+def setSearchScope(val):
+   global searchScope
+   searchScope = val   
+
+def setThresholdValidation(val):
+   global thresholdValidation
+   thresholdValidation = val   
 
 class Slice:
    def __init__(self, sliceID):
-      
-      #self.image = io.imread(filename)
       self.image = IO.getImage(sliceID)
       self.sliceID = sliceID
       self.edges = None
@@ -282,6 +303,7 @@ class Vessel:
       self.exploreInReverse = False # If the vessel has to be explored in reverse
       self.endReason = None
       self.beginningReason = None
+      self.visited = False
       
       # Auxiliary variables, to be cleared after the vessel has been fully 
       # explored.
@@ -297,17 +319,21 @@ class Vessel:
       self.unmatchedRegions = None
       self.closestRegions = None
       self.closestPrevRegions = None
+      self.currentSliceID = None
       
       # TODO: Maybe delay these two computations till the time the vessel is 
       # being processed
       self.regions = None
       self.distances = None
       
+   def setVisitedAs(self, visited):
+      self.visited = visited
    def setExploreInReverse(self, val):
       self.exploreInReverse = val
    def isExplored(self):
       return self.beginningExplored and self.endExplored
    def addCoordinate(self, sliceID, region):
+      global coordinatesSet
       if self.isExplored():
          print "Vessel already fully explored. Cannot add coordinates."
          return
@@ -317,12 +343,25 @@ class Vessel:
       if self.endExplored and not self.exploreInReverse:
          print "Vessel end already explored. Cannot add coordinates."
          return
-      if self.exploreInReverse:
-         self.coordinates.appendleft((sliceID, region['centroid'], \
-                                      region['area']))
+      coordinate = (sliceID, int(region['centroid'][0]), \
+                    int(region['centroid'][1]))
+      if coordinate in coordinatesSet:
+         print "Duplicate coordinate:"
+         print "Vessel ID: " + str(self.vesselID)
+         print "Slice ID: " + str(self.currentSliceID)
+         print "Coordinate: " + str(region['centroid'][0]) + ", " + str(region['centroid'][1])
+         print "Error. Exiting."
+         # TODO: Duplicate coordinates are not ignored, just a warning
+         coordinatesSet.add(coordinate)
+         #sys.exit(0)
       else:
-         self.coordinates.append((sliceID, region['centroid'], \
-                                  region['area']))      
+         coordinatesSet.add(coordinate)
+      if self.exploreInReverse:
+         self.coordinates.appendleft([sliceID, region['centroid'], \
+                                      region['area']])
+      else:
+         self.coordinates.append([sliceID, region['centroid'], \
+                                  region['area']])      
    def addNext(self, other):
       self.next.add(other)
    def addPrevious(self, other):
@@ -341,9 +380,11 @@ class Vessel:
    def endVessel(self, reason):
       self.endExplored = True
       self.endReason = reason
+      
    def beginVessel(self, reason):
       self.beginningExplored = True
-      self.beginningReason = reason   
+      self.beginningReason = reason
+      
    def clearVariables(self):
       self.slice = None
       self.prevRegions = None
@@ -359,6 +400,7 @@ class Vessel:
       self.closestRegions = None
       self.closestPrevRegions = None
       self.onBoundary = False
+      self.currentSliceID = None
 
    def splitVessel(self, sliceID, indexes):
       next1 = Vessel()
@@ -488,12 +530,14 @@ class Vessel:
       self.slice.findEdges(2)
       self.slice.correctEdges()
       self.regions = self.slice.findAllRegions()
+      
    def distance(self, point1, point2):
-      a = point1[0]
-      b = point1[1]
-      c = point2[0]
-      d = point2[1]
-      return math.sqrt((a-c)*(a-c) + (b-d)*(b-d))
+      x1 = point1[0]
+      y1 = point1[1]
+      x2 = point2[0]
+      y2 = point2[1]
+      return math.sqrt((x1-x2)*(x1-x2) + (y1-y2)*(y1-y2))
+      
    def areSamePoints(self, point1, point2):
       return self.distance(point1, point2) <= 2.0
       
@@ -568,66 +612,348 @@ class Vessel:
          distances[i] = self.distance(region['Centroid'], point)
          i += 1
       self.closestPrevRegions = [k for (k,v) in sorted(distances.items(), key=lambda (k, v): v)]
-
+   
+   def warnCloseLimit(self, val, lessthan, limit, tolerance, variableName, string):
+      global enableWarnings
+      if not enableWarnings:
+         return
+      if lessthan:
+         # if val < limit, it is ignored
+         # limit - tolerance < val < limit
+         if limit - tolerance <= val and val < limit: 
+            print "Warning: " + string + variableName + " = " + str(val) + \
+                  ": close to limit of " + str(limit) + ": SliceID = " + \
+                  str(self.currentSliceID) + ": Vessel ID = " + \
+                  str(self.vesselID)
+      else:
+         # if val > limit, it is ignored
+         # limit < val < limit + tolerance
+         if limit < val and val <= limit + tolerance:
+            print "Warning: " + string + variableName + " = " + str(val) + \
+                  ": close to limit of " + str(limit) + "\nSliceID = " + \
+                  str(self.currentSliceID) + "\nVessel ID = " + \
+                  str(self.vesselID)
    def testForMerge1(self):
+      #  i      j
+      #   .    |
+      #    .  |
+      #     .|
+      #     J
+      global searchScope
+      global thresholdValidation
+      global coordinatesSet
+      watchSlice = False
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForMerge1(): vessel: " + str(self.vesselID) + \
+               " slice: " + str(self.currentSliceID) + " regionIndex = " + \
+               str(self.regionIndex)
+      i = self.prevRegionIndex
       if self.regionIndex != -1:
+         if watchSlice and self.currentSliceID == watchSlice:
+            print "Inside testForMerge1(): Point1"      
          return False
-      if self.closestRegions[0] not in self.matchedRegions:       #   i     j
-         return False                                             #        |
-                                                                  #       | 
-      flag = False                                                #      J
-      for j in range(len(self.prevRegions)):
-         if self.matches[j] == self.closestRegions[0]:
-            flag = True
-            break
-      if flag:
-         i = self.prevRegionIndex
-         J = self.closestRegions[0]
-         
+      # No need to check for initial area change since we could not project
+      # i to I
+      for k in range(1, len(self.closestPrevRegions)):
+         j = self.closestPrevRegions[k]
+         J = self.matches[j]
+         if J == -1 or (self.currentSliceID, \
+                        int(self.regions[J]['centroid'][0]), \
+                        int(self.regions[J]['centroid'][1])) in coordinatesSet:
+            continue
          distij = self.distance(self.prevRegions[i]['centroid'], \
                                 self.prevRegions[j]['centroid'])
-         if distij >= 20.0:
+         if watchSlice and self.currentSliceID == watchSlice:
+            print "Inside testForMerge1(): Point2: distij = " + str(distij)         
+         self.warnCloseLimit(distij, False, searchScope, 5.00, "distij", "Inside testForMerge1(): ")
+         if distij >= searchScope:
             return False
+         
          oldArea1 = self.prevRegions[i]['area']
          oldArea2 = self.prevRegions[j]['area']
          newArea  = self.regions[J]['area']
-         areaChange = math.fabs(float(newArea - oldArea1 - oldArea2))/float(oldArea1 + oldArea2)
+         areaChange = math.fabs(float(newArea - oldArea1 - oldArea2)) / \
+                      float(oldArea1 + oldArea2)
+         if watchSlice and self.currentSliceID == watchSlice:
+            print "Inside testForMerge1(): Point3: areaChange = " + \
+                  str(areaChange)
+            self.printRegion(i, True)
+            self.printRegion(j, True)
+            self.printRegion(J, False)
+         # Case 2: I: Slice 117 (60.7708333333, 28.75) 144.0
+         #         i: Slice 118 (55.6470588235, 36.0784313725) 51.0
+         #         j: Slice 118 (63.4, 20.9272727273) - 55.0
+         #         areaChange = 0.358490566038
+         self.warnCloseLimit(areaChange, False, thresholdValidation, 0.05, "areaChange", "Inside testForMerge1(): ")
+         if areaChange <= thresholdValidation:
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForMerge1(): Point4: Success"
          
-         if areaChange <= 0.35:
             results = { \
                        "previous": (i, j), \
                        "next"    : (J) \
                       }
             return results
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForMerge1(): Point5 : No merge1"
       return False
+      
+   def testForMerge2(self):
+      #  i      j
+      #   \    .
+      #    \  .
+      #     \.
+      #     I
+      global searchScope
+      global thresholdValidation
+      global coordinatesSet
+      watchSlice = False
+      i = self.prevRegionIndex
+      I = self.regionIndex
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForMerge2(): vessel: " + str(self.vesselID) + \
+               " slice: " + str(self.currentSliceID)
+      
+      oldArea1 = self.prevRegions[i]['area']
+      newArea = self.regions[I]['area']
+      areaChange1 = float(newArea - oldArea1)/float(oldArea1)
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForMerge2(): areaChange1 = " + str(areaChange1)
+      
+      self.warnCloseLimit(areaChange1, True, 0.30, 0.05, "areaChange1", "Inside testForMerge2(): ")
+      if areaChange1 >= 0.30:
+         for k in range(1, len(self.closestPrevRegions)):
+            j = self.closestPrevRegions[k]
+            if self.exploreInReverse:
+               addendum = 1
+            else:
+               addendum = -1
+            if (self.currentSliceID + addendum, \
+                self.prevRegions[j]['centroid'][0], \
+                self.prevRegions[j]['centroid'][1]) in coordinatesSet:
+               continue
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForMerge2(): Point1"
+               self.printRegion(i, True)
+               self.printRegion(j, True)
+               self.printRegion(I, False)
+         
+            distij = self.distance(self.prevRegions[i]["centroid"], \
+                                   self.prevRegions[j]["centroid"])
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForMerge2(): Point2: distij = " + str(distij)
+            
+            self.warnCloseLimit(distij, False, searchScope, 5.00, "distij", "Inside testForMerge2(): ")
+            if distij >= searchScope:
+               if watchSlice and self.currentSliceID == watchSlice:
+                  print "Inside testForMerge2(): i & j are too far: " + \
+                        str(distij)            
+               return False         
+            if self.matches[j] < 0:
+               oldArea2 = self.prevRegions[j]['area']
+               areaChange2 = math.fabs(float(newArea - oldArea1 - oldArea2)) / \
+                             float(oldArea1 + oldArea2)
+               # TODO: Is this limit too broad?
+               if watchSlice and self.currentSliceID == watchSlice:
+                  print "Inside testForMerge2(): Point4: areaChange2 = " + str(areaChange2)
+               
+               self.warnCloseLimit(areaChange2, False, thresholdValidation, 0.05, "areaChange2", "Inside testForMerge2(): ")
+               if areaChange2 <= thresholdValidation:
+                  if watchSlice and self.currentSliceID == watchSlice:
+                     print "Inside testForMerge2(): Point5: Found Merge2"
+            
+                  result = {"previous": (i, j), \
+                            "next"    : (I)  \
+                           }
+                  return result
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForMerge2(): Point6: No merge2"
+         
+      return False
+
+   # Special merge: 
+   # Previous slice - Two adjacent regions a & b, b about to split
+   # Current slice - Two adjacent regions A & B, part of b split off and merged 
+   # with A
+   def testForSpecialMerge(self):
+      watchSlice = False
+      oldArea = self.getPreviousCoordinate()[2]
+      newArea = self.regions[self.regionIndex]['area']
+      areaChange = float(newArea - oldArea)/float(oldArea)
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForSpecialMerge(): Vessel = " + str(self.vesselID) +\
+               " sliceID = " + str(self.currentSliceID) + " areaChange = " + \
+               str(areaChange)
+      self.warnCloseLimit(areaChange, True, 0.30, 0.05, "areaChange", "Inside testForSpecialMerge(): ")
+      if areaChange >= 0.30:
+         #print "Inside testforspecialmerge(): areaChnage > 0.30"
+         if len(self.closestPrevRegions) < 2 or len(self.closestRegions) < 2:
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): len(closestRegions) or " +\
+                     "len(closestPrevregions) == 0"      
+            return False
+         i = self.closestPrevRegions[0]
+         j = self.closestPrevRegions[1]
+         I = self.closestRegions[0]
+         J = self.closestRegions[1]
+         distiI = self.distance(self.prevRegions[i]["centroid"], \
+                                self.regions[I]["centroid"])
+         self.warnCloseLimit(distiI, False, 20.0, 5.0, "distiI", "Inside testForSpecialMerge(): ")
+         if distiI >= 20.0: # 10.0 (case 1, 3, 4), 20.0 (case 1, 2, 3, 4, syth01 (once random))
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): i & I are too far: " + \
+                     str(distiI)
+            return False
+         
+         distjJ = self.distance(self.prevRegions[j]["centroid"], \
+                                self.regions[J]["centroid"])
+                                
+         self.warnCloseLimit(distjJ, False, 20.0, 5.0, "distjJ", "Inside testForSpecialMerge(): ")
+         if distjJ >= 20.0: # 10.0, 20.0, greater the limit, less constrained condition
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): j & J are too far: " + \
+                     str(distjJ)
+            return False
+         distij = self.distance(self.prevRegions[i]["centroid"], \
+                                self.regions[j]["centroid"])
+         self.warnCloseLimit(distiI, False, 35.0, 15.0, "distij", "Inside testForSpecialMerge(): ")
+         if distij >= 35.0: # 20.0, 35.0, greater the limit, less constrained condition
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): i & j are too far: " + \
+                     str(distij)
+            return False
+         distIJ = self.distance(self.regions[I]["centroid"], \
+                                self.regions[j]["centroid"])
+         self.warnCloseLimit(distIJ, False, 35.0, 15.0, "distIJ", "Inside testForSpecialMerge(): ")
+         if distIJ >= 35.0: # 20.0, 35.0 greater the limit, less constrained condition
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): I & J are too far: " + \
+                     str(distIJ)
+            return False
+         diffijIJ = math.fabs(self.distance(self.prevRegions[i]["centroid"], \
+                                            self.prevRegions[j]["centroid"]) - \
+                              self.distance(self.regions[I]["centroid"], \
+                                            self.regions[j]["centroid"]))
+         self.warnCloseLimit(diffijIJ, False, 10.0, 10.0, "diffijIJ", "Inside testForSpecialMerge(): ")
+         if diffijIJ >= 10.0: #  greater the limit, less constrained condition
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): (i & j) & (I & J) are too different: " + \
+                     str(diffijIJ)
+            return False
+         
+         areaiI = self.prevRegions[i]['area'] - self.regions[I]['area']
+         areajJ = self.prevRegions[j]['area'] - self.regions[J]['area']
+         if (areaiI > 0 and areajJ > 0) or (areaiI < 0 and areajJ < 0):
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): Change in area is not a " +\
+                     "zero sum: areaiI = " + str(areaiI) + ": areajJ = " + \
+                     str(areajJ)
+            return False
+         self.warnCloseLimit(areaiI + areajJ, False, 20.0, 10.0, "areaiI + areajJ", "Inside testForSpecialMerge(): ")
+         if areaiI + areajJ >= 20.0:
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): Sum of gain and loss in " +\
+                     "area is greater than threshold of () :" + \
+                     str(areaiI + areajJ)
+            return False
+            
+         areaij = self.prevRegions[i]['area'] + self.prevRegions[j]['area']
+         areaIJ = self.regions[I]['area'] + self.regions[J]['area']
+         diffTotalArea = math.fabs(float(areaIJ - areaij))/float(areaij)
+         self.warnCloseLimit(diffTotalArea, False, 0.15, 0.05, "diffTotalArea", "Inside testForSpecialMerge(): ")
+         #if diffTotalArea >= 15.0:
+         if diffTotalArea >= 0.15:
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSpecialMerge(): Percentage change in " +\
+                     "total area is greater than threshold of 15%: " + \
+                     str(diffTotalArea)
+            return False
+         if watchSlice and self.currentSliceID == watchSlice:
+            print "Inside testForSpecialMerge(): Successfully detected " +\
+                  "specialmerge."
+         result = {"previous": (i, j), \
+                   "next"    : (I, J)  \
+                  }
+         return result
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForSpecialMerge(): specialmerge not detected "
    
+      return False
+
    def testForSplit(self):
+      #     i
+      #    | .
+      #   |   .
+      #  |     .
+      # I      J
+      
+      global searchScope
+      global thresholdValidation
+      global coordinatesSet
+      watchSlice = False
       i = self.prevRegionIndex
       I = self.regionIndex
       
+      
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForSplit(): vessel: " + str(self.vesselID) + \
+               " slice: " + str(self.currentSliceID)
+         
       # Extract the area from the last coordinate
       oldArea  = self.prevRegions[i]['area']
       newArea1 = self.regions[I]['area']
       areaChange1 = float(newArea1 - oldArea)/float(oldArea)
-
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForSplit(): Point1 : areaChange1 = " + \
+               str(areaChange1)
       # If the area decreased by more than 30% --> Potential split
       # Check for J iff this test is passed
-      if areaChange1 < -0.30:
-         # TODO: Should we check for closest (0), next closest (1) and the next 
-         # closest (2) regions ?
+      # Case 2: i: (32.4, 44.5916666667) - 240.0
+      #         I: (41.6648648649, 44.3081081081) - 185.0
+      #         J: (21.8484848485, 48.0202020202) - 99.0
+      #         areaChange = -0.229166666667 ==> <= 0.22
+      
+      self.warnCloseLimit(areaChange1, False, -0.22, 0.05, "areaChange1", "Inside testForSplit(): ")
+      if areaChange1 <= -0.22:
+         for k in range(1, len(self.closestRegions)):
+            J = self.closestRegions[k]
+            if (self.currentSliceID, int(self.regions[J]['centroid'][0]), \
+                int(self.regions[J]['centroid'][1])) in coordinatesSet:
+               continue
+               
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForMerge2(): Point1.5"
+               self.printRegion(i, True)
+               self.printRegion(I, False)
+               self.printRegion(J, False)
          
-         # If the next closest region in this slice is unmatched,
-         J = self.closestRegions[1]
-         if J in self.unmatchedRegions:
-            newArea2 = self.regions[J]['area']
-            areaChange2 = math.fabs(float(newArea1 + newArea2 - oldArea))/ \
-                          float(oldArea)
-            if areaChange2 <= 0.30: # TODO: Is this limit too broad?
-               results = { \
-                          "previous": (i), \
-                          "next"    : (I, J)\
-                         }
-               return results
+            distIJ = self.distance(self.regions[I]["centroid"], \
+                                   self.regions[J]["centroid"])
+            if watchSlice and self.currentSliceID == watchSlice:
+               print "Inside testForSplit(): Point2 : distIJ = " + str(distIJ)
+            self.warnCloseLimit(distIJ, False, searchScope, 5.0, "distIJ", "Inside testForSplit(): ")
+            if distIJ >= searchScope: # 20.0, 35.0
+               if watchSlice and self.currentSliceID == watchSlice:
+                  print "Inside testForSplit(): Point3 : distIJ >= searchScope "
+               return False
+            if J in self.unmatchedRegions:
+               newArea2 = self.regions[J]['area']
+               areaChange2 = math.fabs(float(newArea1 + newArea2 - oldArea))/ \
+                             float(oldArea)
+               if watchSlice and self.currentSliceID == watchSlice:
+                  print "Inside testForSplit(): Point4 : areaChange2 = " + \
+                        str(areaChange2)
+               self.warnCloseLimit(areaChange2, False, thresholdValidation, 0.05, "areaChange2", "Inside testForSplit(): ")
+               if areaChange2 <= thresholdValidation: # TODO: Is this limit too broad?
+                  results = { \
+                             "previous": (i), \
+                             "next"    : (I, J)\
+                            }
+                  if watchSlice and self.currentSliceID == watchSlice:
+                     print "Inside testForSplit(): Point5 : Success"
+                  return results
+      if watchSlice and self.currentSliceID == watchSlice:
+         print "Inside testForSplit(): Point6 : No split."               
       return False
       
    def printRegion(self, index, isPrev):
@@ -636,6 +962,16 @@ class Vessel:
       else:
          print "Region: " + str(index) + " - (" + str(self.regions[index]['Centroid'][0]) + ", " + str(self.regions[index]['Centroid'][1]) + ") - " + str(self.regions[index]['Area'])
 
+   def printTrace(self):
+      if self.prevRegions:
+         for i in range(len(self.prevRegions)):
+            print str(i) + " - (" + str(self.prevRegions[i]['Centroid'][0]) + ", " + str(self.prevRegions[i]['Centroid'][1]) + ") - " + str(self.prevRegions[i]['Area']) + " --> ",
+            j = self.matches[i]
+            if j != -1:
+               print str(j) + " - (" + str(self.regions[j]['Centroid'][0]) + ", " + str(self.regions[j]['Centroid'][1]) + ") - " + str(self.regions[j]['Area'])
+            else:
+               print
+      
    def actualRegionProximity(self, region1, region2):
       (c1x, c1y) = region1['Centroid']
       (c2x, c2y) = region2['Centroid']
@@ -692,107 +1028,10 @@ class Vessel:
                break
       return self.distance((x1, y1), (x2, y2))
       
-   def testForMerge2(self):
-      #print "testforMerge2:"
-      # Extract the area from the last coordinate
-      # TODO: Should we check for self.regionIndex == NULL?
-      
-      #  i     j
-      #   \
-      #    \
-      #     \ 
-      #     I
-      
-      i = self.prevRegionIndex
-      I = self.regionIndex
-      oldArea1 = self.prevRegions[i]['area']
-      newArea = self.regions[I]['area']
-      areaChange1 = float(newArea - oldArea1)/float(oldArea1)
-      if areaChange1 > 0.30:
-         j = self.closestPrevRegions[1]
-         if self.matches[j] < 0:
-            oldArea2 = self.prevRegions[j]['area']
-            areaChange2 = math.fabs(float(newArea - oldArea1 - oldArea2)) / \
-                          float(oldArea1 + oldArea2)
-            # TODO: Is this limit too broad?
-            # TODO: Criteria for merge1 is 0.35
-            if areaChange2 <= 0.30 and areaChange2 >= -0.30:
-               result = {"previous": (i, j), \
-                         "next"    : (I)  \
-                        }
-               return result
-      return False
-
-   # Special merge: 
-   # Previous slice - Two adjacent regions a & b, b about to split
-   # Current slice - Two adjacent regions A & B, part of b split off and merged 
-   # with A
-   def testForSpecialMerge(self):
-      oldArea = self.getPreviousCoordinate()[2]
-      newArea = self.regions[self.regionIndex]['area']
-      areaChange = float(newArea - oldArea)/float(oldArea)
-      if areaChange > 0.30:
-         i = self.closestPrevRegions[0]
-         j = self.closestPrevRegions[1]
-         I = self.closestRegions[0]
-         J = self.closestRegions[1]
-         distiI = self.distance(self.prevRegions[i]["centroid"], \
-                                self.regions[I]["centroid"])
-         if distiI >= 10.0:
-            #print "i & I are too far: " + str(distiI)
-            return False
-         
-         distjJ = self.distance(self.prevRegions[j]["centroid"], \
-                                self.regions[J]["centroid"])
-         if distjJ >= 10.0:
-            #print "j & J are too far: " + str(distjJ)
-            return False
-         distij = self.distance(self.prevRegions[i]["centroid"], \
-                                self.regions[j]["centroid"])
-         if distij >= 20.0:
-            #print "i & j are too far: " + str(distij)
-            return False
-         distIJ = self.distance(self.regions[I]["centroid"], \
-                                self.regions[j]["centroid"])
-         if distIJ >= 20.0:
-            #print "I & J are too far: " + str(distIJ)
-            return False
-         diffijIJ = math.fabs(self.distance(self.prevRegions[i]["centroid"], \
-                                            self.prevRegions[j]["centroid"]) - \
-                              self.distance(self.regions[I]["centroid"], \
-                                            self.regions[j]["centroid"]))
-         if diffijIJ >= 10.0:
-            #print "(i & j) & (I & J) are too different: " + str(diffijIJ)
-            return False
-         
-         areaiI = self.prevRegions[i]['area'] - self.regions[I]['area']
-         areajJ = self.prevRegions[j]['area'] - self.regions[J]['area']
-         if (areaiI > 0 and areajJ > 0) or (areaiI < 0 and areajJ < 0):
-            #print "Change in area is not a zero sum: areaiI = " + \
-            #      str(areaiI) + ": areajJ = " + str(areajJ)
-            return False
-            
-         if areaiI + areajJ >= 20.0:
-            #print "Sum of gain and loss in area is greater than threshold " +\
-            #      "of 20.0: " + str(areaiI + areajJ)
-            return False
-            
-         areaij = self.prevRegions[i]['area'] + self.prevRegions[j]['area']
-         areaIJ = self.regions[I]['area'] + self.regions[J]['area']
-         diffTotalArea = math.fabs(float(areaIJ - areaij))/float(areaij)
-         if diffTotalArea >= 15.0:
-            #print "Percentage change in total area is greater than threshold" +\
-            #      " of 15.0%: " + str(diffTotalArea)
-            return False
-            
-         result = {"previous": (i, j), \
-                   "next"    : (I, J)  \
-                  }
-         return result
-      return False
-
    # Pre-condition: sliceID & odlCentroid should be valid and appropriate.
    def extendVessel(self, sliceID, oldCentroid):
+      global traceBoundaryVessels
+      self.currentSliceID = sliceID
       if not IO.hasImage(sliceID):
          if self.exploreInReverse:
             self.beginVessel('out-of-scope')
@@ -810,11 +1049,12 @@ class Vessel:
       
       if len(self.regions) == 0:
          # TODO: if there are no regions in the image
-         print "Warning: No regions could be identified in the slice." +\
+         print "Warning: No regions could be identified in the slice.\n" +\
                "Skipping slice no." + str(sliceID)
-         return True
+         return False
       
       self.orderRegions(candidatePoint)
+      
       if self.prevRegions:
          # Match the regions in the previous slice to regions to regions in this
          # slice.
@@ -842,8 +1082,9 @@ class Vessel:
       (mini, minj, maxi, maxj) = self.regions[self.regionIndex]['bbox']
       
       # If the vessel moves beyond the edges of the slice, end it.
-      if self.slice.isOnBoundingEdge((mini, minj)) or \
-         self.slice.isOnBoundingEdge((maxi, maxj)):
+      if not traceBoundaryVessels and \
+         (self.slice.isOnBoundingEdge((mini, minj)) or \
+          self.slice.isOnBoundingEdge((maxi, maxj))):
          # TODO: Should this coordinate be added to the queue?
          if self.exploreInReverse:
             self.beginVessel('out-of-scope')
@@ -871,7 +1112,6 @@ class Vessel:
          if testResult:
             self.mergeVessels(sliceID, testResult)
             return False
-         
          testResult = self.testForSpecialMerge()
          if testResult:
             self.specialMergeVessels(sliceID, testResult)
